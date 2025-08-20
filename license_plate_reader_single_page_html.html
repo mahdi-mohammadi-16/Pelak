@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="fa">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>خواندن پلاک با دوربین (نمونه)</title>
+  <style>
+    body{font-family: sans-serif;direction: rtl;padding:12px;background:#f7fafc}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    video, canvas{max-width:100%;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    #controls{margin-top:10px}
+    button{padding:8px 12px;border-radius:6px;border:1px solid #ddd;background:white}
+    #log{white-space:pre-wrap;margin-top:10px;background:#fff;padding:10px;border-radius:6px;border:1px solid #eee}
+  </style>
+</head>
+<body>
+  <h1>نمونه سایت: خواندن پلاک با دوربین گوشی</h1>
+  <p>این یک نمونهٔ سادهٔ کلاینت‌ساید است که با دوربین گوشی تصویر می‌گیرد، ناحیهٔ مستطیلی شبیه "پلاک" را پیدا می‌کند و از Tesseract برای خواندن متن استفاده می‌کند.
+  دقت برای استفادهٔ واقعی پایین است — برای کاربرد حرفه‌ای از سرویس‌های ALPR یا مدل‌های آموزش‌دیده استفاده کنید.</p>
+
+  <div class="row">
+    <div style="flex:1 1 320px">
+      <video id="video" autoplay playsinline></video>
+      <div id="controls">
+        <button id="startBtn">شروع دوربین</button>
+        <button id="scanBtn" disabled>اسکن یک فریم</button>
+        <button id="loopBtn" disabled>اسکن پیوسته: خاموش</button>
+      </div>
+    </div>
+    <div style="width:360px">
+      <canvas id="outCanvas" width="640" height="360"></canvas>
+      <div id="log">نتیجه: -</div>
+    </div>
+  </div>
+
+  <!-- OpenCV.js -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('opencv loaded')"></script>
+  <!-- Tesseract.js -->
+  <script src="https://unpkg.com/tesseract.js@v2.1.5/dist/tesseract.min.js"></script>
+
+  <script>
+    // توضیح مختصر: این کد برای نمونه است. برای استفادهٔ واقعی نیاز به بهبود (تنظیمات پردازش تصویر، مدل ALPR، و غیره) دارد.
+
+    const video = document.getElementById('video');
+    const outCanvas = document.getElementById('outCanvas');
+    const ctx = outCanvas.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const loopBtn = document.getElementById('loopBtn');
+    const log = document.getElementById('log');
+
+    let stream = null;
+    let loop = false;
+
+    startBtn.onclick = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+        video.srcObject = stream;
+        scanBtn.disabled = false;
+        loopBtn.disabled = false;
+        log.textContent = 'دوربین آماده است.';
+      } catch (e) {
+        console.error(e);
+        alert('مشکل در دسترسی به دوربین: ' + e.message);
+      }
+    };
+
+    scanBtn.onclick = () => { processFrameOnce(); };
+
+    loopBtn.onclick = () => {
+      loop = !loop;
+      loopBtn.textContent = loop ? 'اسکن پیوسته: روشن' : 'اسکن پیوسته: خاموش';
+      if (loop) continuousScan();
+    };
+
+    async function continuousScan(){
+      while(loop){
+        await processFrameOnce();
+        await new Promise(r => setTimeout(r, 800)); // فریم هر ~0.8s
+      }
+    }
+
+    async function processFrameOnce(){
+      if (!stream) return;
+      // draw current video frame to canvas
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 360;
+      outCanvas.width = w; outCanvas.height = h;
+      ctx.drawImage(video,0,0,w,h);
+
+      // wait for opencv to be ready
+      if (typeof cv === 'undefined' || !cv.imread){
+        log.textContent = 'OpenCV هنوز بارگذاری نشده — لطفاً چند ثانیه صبر کنید.';
+        return;
+      }
+
+      // استفاده از OpenCV برای پیدا کردن کانتورهای مستطیل مانند پلاک
+      let src = cv.imread(outCanvas);
+      let gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+      cv.bilateralFilter(gray, gray, 9, 75, 75);
+      let edged = new cv.Mat();
+      cv.Canny(gray, edged, 50, 200);
+
+      // پیدا کردن کانتورها
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+      cv.findContours(edged, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+      let plateRect = null;
+      for (let i = 0; i < contours.size(); ++i) {
+        let cnt = contours.get(i);
+        let peri = cv.arcLength(cnt, true);
+        let approx = new cv.Mat();
+        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+        if (approx.rows === 4) {
+          // بررسی نسبت ابعاد و مساحت
+          let rect = cv.boundingRect(approx);
+          let ar = rect.width / rect.height;
+          let area = rect.width * rect.height;
+          if (ar > 2 && ar < 6 && area > (w*h)*0.001 && area < (w*h)*0.5) {
+            plateRect = rect; // تقریب ساده: اولین مربع مستطیلی با نسبت پلاک
+            approx.delete();
+            break;
+          }
+        }
+        approx.delete();
+      }
+
+      let plateImgDataUrl = null;
+      if (plateRect){
+        // crop
+        let plateMat = src.roi(plateRect);
+        // افزایش وضوح برای tesseract
+        let plateResized = new cv.Mat();
+        let newW = Math.min(plateMat.cols * 2, 1200);
+        let newH = Math.min(plateMat.rows * 2, 400);
+        cv.resize(plateMat, plateResized, new cv.Size(newW, newH), 0, 0, cv.INTER_LINEAR);
+        cv.cvtColor(plateResized, plateResized, cv.COLOR_RGBA2GRAY, 0);
+        cv.threshold(plateResized, plateResized, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+
+        // نمایش ناحیهٔ برش خورده
+        cv.imshow(outCanvas, plateResized);
+        plateImgDataUrl = outCanvas.toDataURL('image/jpeg');
+
+        plateResized.delete(); plateMat.delete();
+      } else {
+        // اگر پلاک پیدا نشد، فقط نمایش فریم اصلی
+        cv.imshow(outCanvas, src);
+        log.textContent = 'پلاک پیدا نشد — لطفاً دوربین را به پلاک نزدیک‌تر و واضح‌تر کنید.';
+      }
+
+      // پاکسازی
+      src.delete(); gray.delete(); edged.delete(); contours.delete(); hierarchy.delete();
+
+      if (plateImgDataUrl){
+        // ارسال عکس به Tesseract
+        log.textContent = 'در حال خواندن متن از ناحیهٔ پیدا شده...';
+        try {
+          const worker = Tesseract.createWorker({ logger: m => console.log(m) });
+          await worker.load();
+          await worker.loadLanguage('eng');
+          await worker.initialize('eng');
+          // محدود کردن کاراکترها به حروف و ارقام ممکن است کمک کند
+          await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' });
+          const { data: { text } } = await worker.recognize(plateImgDataUrl);
+          await worker.terminate();
+
+          const cleaned = (text || '').replace(/[^A-Z0-9-\n]/gi, '').trim();
+          log.textContent = 'نتیجه OCR:\n' + (cleaned || '(خالی)') + '\n\nمتن خام:\n' + text;
+        } catch (e){
+          console.error(e);
+          log.textContent = 'خطا در Tesseract: ' + e.message;
+        }
+      }
+    }
+
+  </script>
+
+  <p style="margin-top:18px;font-size:13px;color:#555">نکات مهم:
+  <ul>
+    <li>برای دسترسی به دوربین، سایت باید از طریق HTTPS باز شود (یا localhost).</li>
+    <li>این نمونه کلاینت‌ساید است و دقت محدودی دارد — برای دقت بالا از مدل‌های آموزش‌دیده ALPR یا سرویس‌های پولی استفاده کنید.</li>
+    <li>برای بهبود: آموزش مدل تشخیص پلاک با YOLO / MobileNet، استفاده از زبان‌های محلی در Tesseract، یا پردازش بیشتر تصویر.</li>
+  </ul>
+  </p>
+</body>
+</html>
